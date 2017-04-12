@@ -44,6 +44,8 @@ longusage() {
   echo "	--no-mrproper	Do not run make mrproper before compilation"
   echo "	--splash		Install framebuffer splash support into initramfs"
   echo "	--no-splash		Do not install framebuffer splash"
+  echo "	--plymouth      Enable plymouth support (forces --udev)"
+  echo "	--no-plymouth       Do not enable plymouth support"
   echo "	--install		Install the kernel after building"
   echo "	--no-install		Do not install the kernel after building"
   echo "	--symlink		Manage symlinks in /boot for installed images"
@@ -90,9 +92,12 @@ longusage() {
   echo "	--splash-res=<res>	Select splash theme resolutions to install"
   echo "	--splash=<theme>	Enable framebuffer splash using <theme>"
   echo "	--splash-res=<res>	Select splash theme resolutions to install"
+  echo "	--plymouth-theme=<theme>    Embed the given plymouth theme"
   echo "	--do-keymap-auto	Forces keymap selection at boot"
   echo "	--keymap		Enables keymap selection support"
   echo "	--no-keymap		Disables keymap selection support"
+  echo "	--udev          Include udev and use it instead of mdev"
+  echo "	--no-udev       Exclude udev and use it instead of mdev (default)"
   echo "	--lvm			Include LVM support"
   echo "	--no-lvm		Exclude LVM support"
   echo "	--mdadm			Include MDADM/MDMON support"
@@ -300,6 +305,10 @@ parse_cmdline() {
 			CMD_KEYMAP=`parse_optbool "$*"`
 			print_info 2 "CMD_KEYMAP: ${CMD_KEYMAP}"
 			;;
+		--udev|--no-udev)
+			CMD_UDEV=`parse_optbool "$*"`
+			print_info 2 "CMD_UDEV: ${CMD_UDEV}"
+			;;
 		--lvm|--no-lvm)
 			CMD_LVM=`parse_optbool "$*"`
 			print_info 2 "CMD_LVM: ${CMD_LVM}"
@@ -506,6 +515,18 @@ parse_cmdline() {
 		--splash-res=*)
 			SPLASH_RES="${*#*=}"
 			print_info 2 "SPLASH_RES: ${SPLASH_RES}"
+			;;
+		--plymouth)
+			CMD_PLYMOUTH=`parse_optbool "$*"`
+			CMD_UDEV=1 # Force UDEV
+			PLYMOUTH_THEME='text'
+			print_info 2 "CMD_PLYMOUTH: ${CMD_PLYMOUTH}"
+			;;
+		--plymouth-theme=*)
+			CMD_PLYMOUTH=1 # Force Plymouth support
+			PLYMOUTH_THEME=`parse_opt "$*"`
+			print_info 2 "CMD_PLYMOUTH: ${CMD_PLYMOUTH}"
+			print_info 2 "PLYMOUTH_THEME: ${PLYMOUTH_THEME}"
 			;;
 		--install|--no-install)
 			CMD_INSTALL=`parse_optbool "$*"`

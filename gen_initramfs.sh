@@ -594,6 +594,163 @@ append_splash(){
 	fi
 }
 
+append_drm() {
+    local MOD_EXT=".ko"
+
+    print_info 2 "initramfs: >> Appending drm drivers..."
+    if [ "${INSTALL_MOD_PATH}" != '' ]
+    then
+        cd ${INSTALL_MOD_PATH}
+    else
+        cd /
+    fi
+
+    rm -rf "${TEMP}/initramfs-drm-${KV}-temp/"
+    mkdir -p "${TEMP}/initramfs-drm-${KV}-temp/lib/modules/${KV}"
+
+    local mods_path="./lib/modules/${KV}"
+    local drm_path="${mods_path}/kernel/drivers/gpu/drm"
+    local modules
+    if [ -d "${drm_path}" ]
+    then
+        modules=$(strip_mod_paths $(find "${drm_path}" -name "*${MOD_EXT}"))
+    else
+        print_warning 2 "Warning :: no drm modules in drivers/gpu/drm..."
+    fi
+
+    rm -f "${TEMP}/moddeps"
+    gen_deps ${modules}
+    if [ -f "${TEMP}/moddeps" ]
+    then
+        modules=$(cat "${TEMP}/moddeps" | sort | uniq)
+    else
+        print_warning 2 "Warning :: module dependencies not generated..."
+    fi
+
+    local mod i fws fw
+    for i in ${modules}
+    do
+        mod=$(find "${mods_path}" -name "${i}${MOD_EXT}" 2>/dev/null| head -n 1)
+        if [ -z "${mod}" ]
+        then
+            print_warning 2 "Warning :: ${i}${MOD_EXT} not found; skipping..."
+            continue
+        fi
+
+        print_info 2 "initramfs: >> Copying ${mod}..."
+        cp -ax --parents "${mod}" "${TEMP}/initramfs-drm-${KV}-temp"
+        fws=( $(get_firmware_files "${mod}") )
+        for fw in "${fws[@]}"
+        do
+            # we must use /lib/firmware because kernel may not
+            # contain all the firmware files and /lib/firmware is
+            # expected to be more up-to-date.
+            print_info 2 "initramfs: >> Copying firmware ${fw}..."
+            cp -ax --parents "/lib/firmware/${fw}" \
+                "${TEMP}/initramfs-drm-${KV}-temp"
+        done
+    done
+
+    cd "${TEMP}/initramfs-drm-${KV}-temp/"
+    log_future_cpio_content
+    find . | cpio ${CPIO_ARGS} --append -F "${CPIO}" \
+            || gen_die "compressing drm cpio"
+    cd "${TEMP}"
+    rm -r "${TEMP}/initramfs-drm-${KV}-temp/"
+}
+
+append_plymouth() {
+    [ -z "${PLYMOUTH_THEME}" ] && \
+        PLYMOUTH_THEME=$(plymouth-set-default-theme)
+    [ -z "${PLYMOUTH_THEME}" ] && PLYMOUTH_THEME=text
+
+    if [ -d "${TEMP}/initramfs-ply-temp" ]
+    then
+        rm -r "${TEMP}/initramfs-ply-temp"
+    fi
+
+    mkdir -p "${TEMP}/initramfs-ply-temp/usr/share/plymouth/themes"
+    mkdir -p "${TEMP}/initramfs-ply-temp/etc/plymouth"
+    mkdir -p "${TEMP}/initramfs-ply-temp/"{bin,sbin}
+    mkdir -p "${TEMP}/initramfs-ply-temp/usr/"{bin,sbin}
+
+    cd "${TEMP}/initramfs-ply-temp"
+
+    local theme_dir="/usr/share/plymouth/themes"
+    local t=
+
+    local p=
+    local ply="${theme_dir}/${PLYMOUTH_THEME}/${PLYMOUTH_THEME}.plymouth"
+    local plugin=$(grep "^ModuleName=" "${ply}" | cut -d= -f2-)
+    local plugin_binary=
+    if [ -n "${plugin}" ]
+    then
+        plugin_binary="$(plymouth --get-splash-plugin-path)/${plugin}.so"
+    fi
+
+    print_info 1 "  >> Installing plymouth [ using the ${PLYMOUTH_THEME} theme and plugin: \"${plugin}\" ]..."
+
+    for t in text details ${PLYMOUTH_THEME}; do
+        cp -R "${theme_dir}/${t}" \
+            "${TEMP}/initramfs-ply-temp${theme_dir}/" || \
+            gen_die "cannot copy ${theme_dir}/details"
+    done
+    cp /usr/share/plymouth/{bizcom.png,plymouthd.defaults} \
+        "${TEMP}/initramfs-ply-temp/usr/share/plymouth/" || \
+            gen_die "cannot copy bizcom.png and plymouthd.defaults"
+
+    # Do both config setup
+    echo -en "[Daemon]\nTheme=${PLYMOUTH_THEME}\n" > \
+        "${TEMP}/initramfs-ply-temp/etc/plymouth/plymouthd.conf" || \
+        gen_die "Cannot create /etc/plymouth/plymouthd.conf"
+    ln -sf "${PLYMOUTH_THEME}/${PLYMOUTH_THEME}.plymouth" \
+        "${TEMP}/initramfs-ply-temp${theme_dir}/default.plymouth" || \
+        gen_die "cannot setup the default plymouth theme"
+
+    # plymouth may have placed the libs into /usr/
+    local libply_core="/lib*/libply-splash-core.so.*"
+    if ! ls -1 ${libply_core} 2>/dev/null >/dev/null; then
+        libply_core="/usr/lib*/libply-splash-core.so.*"
+    fi
+
+    local libs=(
+        "${libply_core}"
+        "/usr/lib*/libply-splash-graphics.so.*"
+        "/usr/lib*/plymouth/text.so"
+        "/usr/lib*/plymouth/details.so"
+        "/usr/lib*/plymouth/renderers/frame-buffer.so"
+        "/usr/lib*/plymouth/renderers/drm.so"
+        "${plugin_binary}"
+    )
+    # lib64 must take the precedence or all the cpio archive
+    # symlinks will be fubared
+    local slib= lib= final_lib= final_libs=()
+    for slib in "${libs[@]}"; do
+        lib=( ${slib} )
+        final_lib="${lib[0]}"
+        final_libs+=( "${final_lib}" )
+    done
+
+    local plymouthd_bin="/sbin/plymouthd"
+    [ ! -e "${plymouthd_bin}" ] && \
+        plymouthd_bin="/usr/sbin/plymouthd"
+
+    local plymouth_bin="/bin/plymouth"
+    [ ! -e "${plymouth_bin}" ] && \
+        plymouth_bin="/usr/bin/plymouth"
+
+    copy_binaries "${TEMP}/initramfs-ply-temp" \
+        "${plymouthd_bin}" "${plymouth_bin}" \
+        "${final_libs[@]}" || gen_die "cannot copy plymouth"
+
+    log_future_cpio_content
+    find . -print | cpio ${CPIO_ARGS} --append -F "${CPIO}" \
+        || gen_die "appending plymouth to cpio"
+
+    cd "${TEMP}"
+    rm -r "${TEMP}/initramfs-ply-temp/"
+}
+
 append_overlay(){
 	cd ${INITRAMFS_OVERLAY}
 	log_future_cpio_content
@@ -651,7 +808,7 @@ append_dropbear(){
 			/usr/bin/dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key -s 4096 > /dev/null
 		fi
 	fi
-	
+
 	if [ ! -e /etc/dropbear/dropbear_dss_host_key ]
 	then
 		/usr/bin/dropbearkey -t dss -f /etc/dropbear/dropbear_dss_host_key > /dev/null
@@ -677,7 +834,7 @@ append_dropbear(){
 		mkdir -p ${TEMP}/initramfs-dropbear-temp/lib
 		cp -L /lib/libnss_files.so.2 ${TEMP}/initramfs-dropbear-temp/lib/
 	fi
-	
+
 	sed "s/compat/files/g" /etc/nsswitch.conf > ${TEMP}/initramfs-dropbear-temp/etc/nsswitch.conf
 	echo "root:x:0:0:root:/root:/bin/login-remote.sh" > ${TEMP}/initramfs-dropbear-temp/etc/passwd
 	echo "/bin/login-remote.sh" > ${TEMP}/initramfs-dropbear-temp/etc/shells
@@ -692,10 +849,10 @@ append_dropbear(){
 	chmod 0644 ${TEMP}/initramfs-dropbear-temp/etc/group
 	mkfifo ${TEMP}/initramfs-dropbear-temp/etc/dropbear/fifo_root
 	mkfifo ${TEMP}/initramfs-dropbear-temp/etc/dropbear/fifo_swap
-	
+
 	copy_binaries "${TEMP}"/initramfs-dropbear-temp/ /usr/sbin/dropbear \
 		/bin/login /usr/bin/passwd
-	
+
 	log_future_cpio_content
 	cd "${TEMP}"/initramfs-dropbear-temp \
 		|| gen_die "cd '${TEMP}/initramfs-dropbear-temp' failed"
@@ -751,6 +908,133 @@ append_gpg() {
 	log_future_cpio_content
 	find . -print | cpio ${CPIO_ARGS} --append -F "${CPIO}"
 	rm -rf "${TEMP}/initramfs-gpg-temp" > /dev/null
+}
+
+append_udev() {
+    if [ -d "${TEMP}/initramfs-udev-temp" ]
+    then
+        rm -r "${TEMP}/initramfs-udev-temp"
+    fi
+
+    local udev_dir=$(_get_udevdir)
+    udev_files="
+        ${udev_dir}/rules.d/50-udev-default.rules
+        ${udev_dir}/rules.d/60-persistent-storage.rules
+        ${udev_dir}/rules.d/80-drivers.rules
+        /etc/udev/udev.conf
+    "
+    udev_maybe_files="
+        ${udev_dir}/rules.d/40-gentoo.rules
+        ${udev_dir}/rules.d/99-systemd.rules
+        ${udev_dir}/rules.d/71-seat.rules
+        /etc/modprobe.d/blacklist.conf
+        /usr/lib/systemd/network/99-default.link
+    "
+    is_maybe=0
+    for f in ${udev_files} -- ${udev_maybe_files}; do
+        [ "${f}" = "--" ] && {
+            is_maybe=1;
+            continue;
+        }
+        mkdir -p "${TEMP}/initramfs-udev-temp"/$(dirname "${f}") || \
+            gen_die "cannot create rules.d directory"
+        cp "${f}" "${TEMP}/initramfs-udev-temp/${f}"
+        if [ "${?}" != "0" ]
+        then
+            [ "${is_maybe}" = "0" ] && \
+                gen_die "cannot copy ${f} from udev"
+            [ "${is_maybe}" = "1" ] && \
+                print_warning 1 "cannot copy ${f} from udev"
+        fi
+    done
+
+    # systemd-207 dropped /sbin/udevd
+    local udevd_bin=/sbin/udevd
+    [ ! -e "${udevd_bin}" ] && udevd_bin=/usr/lib/systemd/systemd-udevd
+    # systemd-210, moved udevd to another location
+    [ ! -e "${udevd_bin}" ] && udevd_bin=/lib/systemd/systemd-udevd
+    [ ! -e "${udevd_bin}" ] && gen_die "cannot find udevd"
+
+    local udevadm_bin=/bin/udevadm
+    [ ! -e "${udevadm_bin}" ] && udevadm_bin=/usr/bin/udevadm
+
+    # Copy binaries
+    copy_binaries "${TEMP}/initramfs-udev-temp" \
+        "${udevd_bin}" "${udevadm_bin}" "${udev_dir}/scsi_id" \
+        "${udev_dir}/ata_id" "${udev_dir}/mtd_probe"
+
+    cd "${TEMP}/initramfs-udev-temp/"
+    log_future_cpio_content
+    find . -print | cpio ${CPIO_ARGS} --append -F "${CPIO}" \
+            || gen_die "compressing udev cpio"
+    cd "${TEMP}"
+    rm -rf "${TEMP}/initramfs-udev-temp" > /dev/null
+}
+
+append_ld_so_conf() {
+    local tmp_dir="${TEMP}/initramfs-ld-temp"
+    rm -rf "${tmp_dir}"
+    mkdir -p "${tmp_dir}"
+
+    print_info 1 'ldconfig: adding /sbin/ldconfig...'
+
+    # Add ldconfig to the initramfs so that we can
+    # run ldconfig at runtime if needed.
+    copy_binaries "${tmp_dir}" "/sbin/ldconfig"
+
+    print_info 1 'ld.so.conf: adding /etc/ld.so.conf{.d/*,}...'
+
+    local f= f_dir=
+    for f in /etc/ld.so.conf /etc/ld.so.conf.d/*; do
+        if [ -f "${f}" ]; then
+            f_dir=$(dirname "${f}")
+            tmp_f_dir="${tmp_dir}/${f_dir}"
+
+            mkdir -p "${tmp_f_dir}" || \
+                gen_die "cannot create dir ${tmp_f_dir}"
+            cp -a "${f}" "${tmp_f_dir}/" || \
+                gen_die "cannot copy ${f} to ${tmp_f_dir}"
+        fi
+    done
+
+    cd "${tmp_dir}" || gen_die "cannot cd into ${tmp_dir}"
+    log_future_cpio_content
+    find . -print | cpio ${CPIO_ARGS} --append -F "${CPIO}" \
+            || gen_die "compressing ld.so.conf.* cpio"
+    cd "$(dirname "${tmp_dir}")"
+    rm -rf "${tmp_dir}"
+
+    # Unfortunately genkernel works by appending cruft over crut
+    # but we need to generate a valid ld.so.conf. So we extract the
+    # current CPIO archive, run ldconfig -r against it and append the
+    # last bits.
+    #
+    # We only do this if we are "root", because "ldconfig -r" requires
+    # root privileges to chroot. If we are not root we don't generate the
+    # ld.so.cache here, but expect that ldconfig would regenerate it when the
+    # machine boots.
+    if [[ $(id -u) == 0 && -z ${FAKED_MODE:-} ]]; then
+        local tmp_dir_ext="${tmp_dir}/extracted"
+        mkdir -p "${tmp_dir_ext}"
+        mkdir -p "${tmp_dir}/etc"
+        cd "${tmp_dir_ext}" || gen_die "cannot cd into ${tmp_dir_ext}"
+        cpio -id --quiet < "${CPIO}" || gen_die "cannot re-extract ${CPIO}"
+
+        cd "${tmp_dir}" || gen_die "cannot cd into ${tmp_dir}"
+        ldconfig -r "${tmp_dir_ext}" || \
+            gen_die "cannot run ldconfig on ${tmp_dir_ext}"
+        cp -a "${tmp_dir_ext}/etc/ld.so.cache" "${tmp_dir}/etc/ld.so.cache" || \
+            gen_die "cannot copy ld.so.cache"
+        rm -rf "${tmp_dir_ext}"
+
+        cd "${tmp_dir}" || gen_die "cannot cd into ${tmp_dir}"
+        log_future_cpio_content
+        find . -print | cpio ${CPIO_ARGS} --append -F "${CPIO}" \
+                || gen_die "compressing ld.so.cache cpio"
+        cd "$(dirname "${tmp_dir}")"
+        rm -rf "${tmp_dir}"
+    fi
+
 }
 
 print_list()
@@ -945,6 +1229,7 @@ create_initramfs() {
 	CPIO="${TMPDIR}/initramfs-${KV}"
 	append_data 'devices' # WARNING, must be first!
 	append_data 'base_layout'
+	append_data 'udev' "${UDEV}"
 	append_data 'auxilary' "${BUSYBOX}"
 	append_data 'busybox' "${BUSYBOX}"
 	isTrue "${CMD_E2FSPROGS}" && append_data 'e2fsprogs'
@@ -975,6 +1260,9 @@ create_initramfs() {
 	append_data 'splash' "${SPLASH}"
 
 	append_data 'modprobed'
+
+	append_data 'plymouth' "${PLYMOUTH}"
+	isTrue "${PLYMOUTH}" && append_data 'drm'
 
 	if isTrue "${FIRMWARE}" && [ -n "${FIRMWARE_DIR}" ]
 	then
@@ -1171,7 +1459,7 @@ create_initramfs() {
 			[[ -z ${mkimage_cmd} ]] && gen_die "mkimage is not available. Please install package 'dev-embedded/u-boot-tools'."
 			local mkimage_args="-A ${ARCH} -O linux -T ramdisk -C ${compression:-none} -a 0x00000000 -e 0x00000000"
 			print_info 1 "        >> Wrapping initramfs using mkimage..."
-			print_info 2 "${mkimage_cmd} ${mkimage_args} -n initramfs-${KV} -d ${CPIO} ${CPIO}.uboot" 
+			print_info 2 "${mkimage_cmd} ${mkimage_args} -n initramfs-${KV} -d ${CPIO} ${CPIO}.uboot"
 			${mkimage_cmd} ${mkimage_args} -n "initramfs-${KV}" -d "${CPIO}" "${CPIO}.uboot" >> ${LOGFILE} 2>&1 || gen_die "Wrapping initramfs using mkimage failed"
 			mv -f "${CPIO}.uboot" "${CPIO}" || gen_die "Rename failed"
 		fi

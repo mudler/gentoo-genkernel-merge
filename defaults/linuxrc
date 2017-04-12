@@ -104,9 +104,9 @@ do
 			DMRAID_OPTS=${x#*=}
 			USE_DMRAID_NORMAL=1
 		;;
-		domultipath) 
-			good_msg "Booting with multipath activated." 
-			USE_MULTIPATH_NORMAL=1 
+		domultipath)
+			good_msg "Booting with multipath activated."
+			USE_MULTIPATH_NORMAL=1
 		;;
 		dozfs*)
 			USE_ZFS=1
@@ -338,7 +338,7 @@ then
 	[ "$USE_ZFS" = "1" ] && MY_HWOPTS="${MY_HWOPTS} zfs"
 fi
 
-splash 'init'
+splashcmd 'init'
 
 cmdline_hwopts
 
@@ -347,15 +347,6 @@ mount_devfs
 
 # Mount sysfs
 mount_sysfs
-
-# Initialize mdev
-good_msg 'Activating mdev'
-
-# Serialize hotplug events
-touch /dev/mdev.seq
-
-# Setup hotplugging for firmware loading
-echo /sbin/mdev > /proc/sys/kernel/hotplug
 
 # Load modules listed in MY_HWOPTS if /lib/modules exists for the running kernel
 if [ -z "${DO_modules}" ]
@@ -382,8 +373,9 @@ else
 	good_msg 'Skipping module load; no modules in the ramdisk!'
 fi
 
-# Ensure that device nodes are properly configured
-mdev -s || bad_msg "mdev -s failed"
+devmgr_init
+
+is_mdev && splashcmd init
 
 cd /
 
@@ -539,9 +531,9 @@ do
 					prompt_user "REAL_ROOT" "root block device"
 					continue
 				fi
-					
+
 				ROOT_DEV="${REAL_ROOT#*=}"
-				if [ "${ROOT_DEV}" != 'ZFS' ] 
+				if [ "${ROOT_DEV}" != 'ZFS' ]
 				then
 					if [ "$(zfs get type -o value -H ${ROOT_DEV})" = 'filesystem' ]
 					then
@@ -570,8 +562,8 @@ do
 								REAL_ROOT=${i}
 								ROOTFSTYPE=zfs
 								break
-							fi	
-						
+							fi
+
 						done;
 
 					else
@@ -584,7 +576,7 @@ do
 					prompt_user "REAL_ROOT" "root block device"
 					got_good_root=0
 				fi
-					
+
 				continue
 				;;
 		esac
@@ -950,7 +942,7 @@ fi # if [ "${CDROOT}" = '1' ]
 if [ -f ${NEW_ROOT}/etc/initramfs.mounts ]; then
 	fslist=$(get_mounts_list)
 else
-	fslist="/usr" 
+	fslist="/usr"
 fi
 
 for fs in $fslist; do
@@ -1040,7 +1032,7 @@ rundebugshell "before entering switch_root"
 exec /sbin/switch_root -c "/dev/console" "${CHROOT}" "${REAL_INIT:-/sbin/init}" ${init_opts}
 
 # If we get here, something bad has happened
-splash 'verbose'
+splashcmd 'verbose'
 
 bad_msg "A fatal error has occured since ${REAL_INIT:-/sbin/init} did not"
 bad_msg "boot correctly. Trying to open a shell..."

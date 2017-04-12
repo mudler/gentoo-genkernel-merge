@@ -547,7 +547,7 @@ findnfsmount() {
 				if [ `echo $OPTION | sed -e "s/=/ /g" | cut -d " " -f 1` = 'rootserver' ]
 				then
 					NFSIP=`echo $OPTION | sed -e "s/=/ /g" | cut -d " " -f 2`
-				fi 
+				fi
 			done
 
 			# Obtain NFSPATH
@@ -657,6 +657,149 @@ run_shell() {
 fs_type_in_use() {
 	fs_type=$1
 	cut -d ' ' -f 3 < /proc/mounts | fgrep -q "${fs_type}"
+}
+
+is_udev() {
+    [ -x "${UDEVD}" ] && [ -z "${USE_MDEV}" ] && return 0
+    return 1
+}
+
+is_mdev() {
+    if [ ! -x "${UDEVD}" ] || [ -n "${USE_MDEV}" ]; then
+        return 0
+    fi
+    return 1
+}
+
+devmgr_init() {
+    if is_udev; then
+        good_msg "Activating udev"
+        "${UDEVD}" --daemon --resolve-names=never && \
+            udevadm trigger --action=add && \
+            udevadm settle || bad_msg "udevd failed to run"
+    elif is_mdev; then
+        good_msg "Activating mdev"
+
+				# Serialize hotplug events
+				touch /dev/mdev.seq
+
+				# Setup hotplugging for firmware loading
+				echo /sbin/mdev > /proc/sys/kernel/hotplug
+
+        # Ensure that device nodes are properly configured
+        "${MDEVD}" -s || bad_msg "mdev -s failed"
+    else
+        bad_msg "Cannot find either udev or mdev"
+    fi
+}
+
+
+splash_init() {
+    if is_udev; then
+        # if udev, we can load the splash earlier
+        # In the plymouth case, udev will load KMS automatically
+        splashcmd init
+    fi
+}
+
+splashcmd() {
+    # plymouth support
+    local cmd="${1}"
+    shift
+
+    case "${cmd}" in
+        init)
+        is_fbsplash && splash init
+        is_plymouth && _plymouth_init
+        ;;
+
+        verbose)
+        is_fbsplash && splash verbose
+        _plymouth_hide
+        ;;
+
+        quiet)
+        # no fbsplash support
+        _plymouth_show
+        ;;
+
+        set_msg)
+        is_fbsplash && splash set_msg "${1}"
+        _plymouth_message "${1}"
+        ;;
+
+        hasroot)
+        # no fbsplash support
+        _plymouth_newroot "${1}"
+        ;;
+    esac
+}
+
+is_fbsplash() {
+    if [ -e "${INITRD_SPLASH}" ] && [ "${FBSPLASH}" = '1' ]
+    then
+        return 0
+    fi
+    return 1
+}
+
+is_plymouth() {
+    if [ "${PLYMOUTH}" = '1' ] && [ "${QUIET}" = '1' ] \
+        && [ -e "${PLYMOUTHD_BIN}" ]
+    then
+        return 0
+    fi
+    return 1
+}
+
+is_plymouth_started() {
+    [ -n "${PLYMOUTH_FAILURE}" ] && return 1
+    is_plymouth && "${PLYMOUTH_BIN}" --ping 2>/dev/null && return 0
+    return 1
+}
+
+_plymouth_init() {
+    good_msg "Enabling Plymouth"
+    mkdir -p /run/plymouth || return 1
+
+    # Make sure that udev is done loading tty and drm
+    if is_udev
+    then
+        udevadm trigger --action=add --attr-match=class=0x030000 \
+            >/dev/null 2>&1
+        udevadm trigger --action=add --subsystem-match=graphics \
+            --subsystem-match=drm --subsystem-match=tty \
+            >/dev/null 2>&1
+        udevadm settle
+    fi
+
+    local consoledev=
+    local other=
+    read consoledev other < /sys/class/tty/console/active
+    consoledev=${consoledev:-tty0}
+    "${PLYMOUTHD_BIN}" --attach-to-session --pid-file /run/plymouth/pid \
+        || {
+        PLYMOUTH_FAILURE=1;
+        return 1;
+    }
+    _plymouth_show
+    good_msg "Plymouth enabled"
+}
+
+_plymouth_hide() {
+    is_plymouth_started && "${PLYMOUTH_BIN}" --hide-splash
+}
+
+_plymouth_show() {
+    is_plymouth_started && "${PLYMOUTH_BIN}" --show-splash
+}
+
+_plymouth_message() {
+    is_plymouth_started && "${PLYMOUTH_BIN}" --update="${1}"
+}
+
+_plymouth_newroot() {
+    is_plymouth_started && "${PLYMOUTH_BIN}" --newroot="${1}"
 }
 
 mount_devfs () {
@@ -774,6 +917,91 @@ prompt_user(){
 			eval ${1}'='${oldvalue}
 			;;
 	esac
+}
+
+
+# Courtesy of dracut. Licensed under GPL-2.
+# Taken from: dracut/modules.d/90crypt/crypt-lib.sh
+# ask_for_password
+#
+# Wraps around plymouth ask-for-password and adds fallback to tty password ask
+# if plymouth is not present.
+#
+# --cmd command
+#   Command to execute. Required.
+# --prompt prompt
+#   Password prompt. Note that function already adds ':' at the end.
+#   Recommended.
+# --tries n
+#   How many times repeat command on its failure.  Default is 3.
+# --ply-[cmd|prompt|tries]
+#   Command/prompt/tries specific for plymouth password ask only.
+# --tty-[cmd|prompt|tries]
+#   Command/prompt/tries specific for tty password ask only.
+# --tty-echo-off
+#   Turn off input echo before tty command is executed and turn on after.
+#   It's useful when password is read from stdin.
+ask_for_password() {
+    local cmd; local prompt; local tries=3
+    local ply_cmd; local ply_prompt; local ply_tries=3
+    local tty_cmd; local tty_prompt; local tty_tries=3
+    local ret
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cmd) ply_cmd="$2"; tty_cmd="$2" shift;;
+            --ply-cmd) ply_cmd="$2"; shift;;
+            --tty-cmd) tty_cmd="$2"; shift;;
+            --prompt) ply_prompt="$2"; tty_prompt="$2" shift;;
+            --ply-prompt) ply_prompt="$2"; shift;;
+            --tty-prompt) tty_prompt="$2"; shift;;
+            --tries) ply_tries="$2"; tty_tries="$2"; shift;;
+            --ply-tries) ply_tries="$2"; shift;;
+            --tty-tries) tty_tries="$2"; shift;;
+            --tty-echo-off) tty_echo_off=yes;;
+        esac
+        shift
+    done
+
+    { flock -s 9;
+        # Prompt for password with plymouth, if installed and running.
+        if is_plymouth_started
+        then
+            "${PLYMOUTH_BIN}" ask-for-password \
+                --prompt="$ply_prompt" \
+                --number-of-tries=$ply_tries \
+                --command="$ply_cmd"
+            ret=$?
+        else
+            splashcmd verbose
+            if [ "$tty_echo_off" = yes ]; then
+                stty_orig="$(stty -g)"
+                stty -echo
+            fi
+
+            local i=1
+            while [ $i -le $tty_tries ]; do
+                [ -n "$tty_prompt" ] && \
+                printf "$tty_prompt [$i/$tty_tries]:" >&2
+            eval "$tty_cmd" && ret=0 && break
+            ret=$?
+            i=$(($i+1))
+            [ -n "$tty_prompt" ] && printf '\n' >&2
+            done
+
+            [ "$tty_echo_off" = yes ] && stty $stty_orig
+
+            # no need for: splashcmd quiet
+            # since fbsplash does not support it
+            if [ $ret -ne 0 ] && is_fbsplash
+            then
+                splashcmd set_msg 'Disk unlocked.'
+            fi
+        fi
+    } 9>/.console_lock
+
+    [ $ret -ne 0 ] && bad_msg "Wrong password"
+    return $ret
 }
 
 cmdline_hwopts() {
@@ -1156,6 +1384,23 @@ startiscsi() {
 	fi
 }
 
+_crypt_exec() {
+    local luks_dev="${1}"
+    local ply_cmd="${2}" # command for use when plymouth is active
+    local tty_cmd="${3}" # command for use without plymouth
+    local do_ask="${4}"  # whether we need a passphrase at all
+
+    if [ "${CRYPT_SILENT}" = "1" -o "${do_ask}" = "0" ]; then
+        eval ${tty_cmd} >/dev/null 2>/dev/null
+    else
+        ask_for_password --ply-tries 5 \
+            --ply-cmd "${ply_cmd}" \
+            --ply-prompt "Encryption password (${luks_dev}): " \
+            --tty-tries 5 \
+            --tty-cmd "${tty_cmd}" || return 1
+        return 0
+    fi
+}
 
 # Open a LUKS device
 # It is either the root or a swap, other devices are supported in the scripts provided with sys-fs/cryptsetup
@@ -1180,7 +1425,9 @@ openLUKS() {
 	[ ! -e /sbin/cryptsetup ] && bad_msg "The ramdisk does not support LUKS" && exit 1
 	while [ 1 ]
 	do
-		local gpg_cmd=""
+		local gpg_tty_cmd=""
+		local gpg_ply_cmd=""
+
 		# if crypt_silent=1 and some error occurs, enter shell quietly
 		if [ \( ${CRYPT_SILENT} -eq 1 \) -a \( \( \( ${DEV_ERROR} -eq 1 \) -o \( ${KEY_ERROR} -eq 1 \) \) -o \( ${KEYDEV_ERROR} -eq 1 \) \) ]
 		then
@@ -1285,13 +1532,35 @@ openLUKS() {
 						[ -e /dev/tty ] && mv /dev/tty /dev/tty.org
 						mknod /dev/tty c 5 1
 						cryptsetup_options="${cryptsetup_options} -d -"
-						gpg_cmd="/sbin/gpg --logger-file /dev/null --quiet --decrypt ${mntkey}${LUKS_KEY} |"
+						#gpg_cmd="/sbin/gpg --logger-file /dev/null --quiet --decrypt ${mntkey}${LUKS_KEY} |"
+						# if plymouth not in use, gpg reads keyfile passphrase...
+						gpg_tty_cmd="/usr/bin/gpg --logger-file /dev/null"
+						gpg_tty_cmd="${gpg_tty_cmd} --quiet --decrypt ${mntkey}${LUKS_KEY} | "
+						# but when plymouth is in use, keyfile passphrase piped in
+						gpg_ply_cmd="/usr/bin/gpg --logger-file /dev/null"
+						gpg_ply_cmd="${gpg_ply_cmd} --quiet --passphrase-fd 0 --batch --no-tty"
+						gpg_ply_cmd="${gpg_ply_cmd} --decrypt ${mntkey}${LUKS_KEY} | "
 					else
 						cryptsetup_options="${cryptsetup_options} -d ${mntkey}${LUKS_KEY}"
 					fi
 				fi
 				# At this point, keyfile or not, we're ready!
-				crypt_filter "${gpg_cmd}cryptsetup ${cryptsetup_options} luksOpen ${LUKS_DEVICE} ${LUKS_NAME}"
+				local ply_cmd="${gpg_ply_cmd}${CRYPTSETUP_BIN}"
+				local tty_cmd="${gpg_tty_cmd}${CRYPTSETUP_BIN}"
+				ply_cmd="${ply_cmd} ${cryptsetup_opts} luksOpen ${luks_device} ${luks_dev_name}"
+				tty_cmd="${tty_cmd} ${cryptsetup_opts} luksOpen ${luks_device} ${luks_dev_name}"
+
+				is_plymouth && (
+						# send to a temporary shell script, so plymouth can
+						# invoke the pipeline successfully
+						local ply_cmd_file="$(mktemp -t "ply_cmd.XXXXXX")"
+						printf '#!/bin/sh\n%s\n' "${ply_cmd}" > "${ply_cmd_file}"
+						chmod 500 "${ply_cmd_file}"
+						_crypt_exec "${luks_device}" "${ply_cmd_file}" "${tty_cmd}" "${passphrase_needed}"
+						crypt_filter_ret=$?
+						rm -f "${ply_cmd_file}"
+				) || \
+				crypt_filter "${gpg_tty_cmd}cryptsetup ${cryptsetup_options} luksOpen ${LUKS_DEVICE} ${LUKS_NAME}" \ && \
 				crypt_filter_ret=$?
 
 				touch ${flag_opened}
@@ -1321,7 +1590,7 @@ startLUKS() {
 
 	# if key is set but neither ssh enabled or key device is given, find
 	# the key device
-	
+
 	if [ -e "/usr/sbin/dropbear" ]; then
 		startdropbear
 	fi

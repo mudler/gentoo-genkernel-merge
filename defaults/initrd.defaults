@@ -56,6 +56,20 @@ QUIET='1'
 ROOT_LINKS='bin sbin lib lib32 lib64 boot usr opt emul'
 ROOT_TREES='etc root home var'
 
+# systemd-207 dropped /sbin/udevd
+UDEVD="/sbin/udevd"
+[ ! -e "${UDEVD}" ] && UDEVD="/usr/lib/systemd/systemd-udevd"
+[ ! -e "${UDEVD}" ] && UDEVD="/lib/systemd/systemd-udevd"
+
+MDEVD="/sbin/mdev"
+INITRD_SPLASH="/etc/initrd.splash"
+# latest plymouth ebuild in gentoo has it in /usr/bin
+PLYMOUTHD_BIN="/sbin/plymouthd"
+[ ! -e "${PLYMOUTHD_BIN}" ] && PLYMOUTHD_BIN="/usr/sbin/plymouthd"
+
+PLYMOUTH_BIN="/bin/plymouth"
+[ ! -e "${PLYMOUTH_BIN}" ] && PLYMOUTH_BIN="/usr/bin/plymouth"
+
 REAL_ROOT=''
 CONSOLE='/dev/console'
 NEW_ROOT='/newroot'
@@ -88,7 +102,7 @@ DEFAULT_NFSOPTIONS="ro,nolock,rsize=1024,wsize=1024"
 # - modules
 HWOPTS_BLK='nvme pata sata scsi usb firewire waitscan'
 HWOPTS_OBSOLETE='pcmcia ataraid' # Obsolete stuff that might be useful on old hardware, do$X only.
-HWOPTS="keymap cache modules ${HWOPTS_BLK} lvm dmraid multipath mdadm zfs fs net iscsi crypto"
+HWOPTS="keymap cache modules ${HWOPTS_BLK} lvm dmraid multipath mdadm zfs fs net iscsi plymouth crypto"
 
 # This is the set of default HWOPTS, in the order that they are loaded.
 # This is whitespace aligned with HWOPTS above.
